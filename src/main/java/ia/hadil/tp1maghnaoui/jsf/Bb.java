@@ -1,6 +1,7 @@
 package ia.hadil.tp1maghnaoui.jsf;
 
-import ia.hadil.tp0hadilmaghnaoui.service.GenerateurReponse;
+import ia.hadil.tp1maghnaoui.service.JsonAdapterPourGemini;
+import ia.hadil.tp1maghnaoui.service.LlmInteraction;
 import jakarta.faces.application.FacesMessage;
 import jakarta.faces.context.FacesContext;
 import jakarta.faces.model.SelectItem;
@@ -10,6 +11,7 @@ import jakarta.inject.Named;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -22,7 +24,7 @@ import java.util.List;
 public class Bb implements Serializable {
 
     /**
-     * Rôle "système" que l'on attribuera plus tard à un LLM.
+     * Rôle "système" attribué au LLM.
      * Possible d'écrire un nouveau rôle dans la liste déroulante.
      */
     private String roleSysteme;
@@ -43,7 +45,7 @@ public class Bb implements Serializable {
      */
     private String question;
     /**
-     * Dernière réponse de l'API OpenAI.
+     * Dernière réponse de l'API.
      */
     private String reponse;
     /**
@@ -52,10 +54,25 @@ public class Bb implements Serializable {
     private StringBuilder conversation = new StringBuilder();
 
     /**
-     * Service pour modifier la question et générer la réponse.
+     * Pour afficher ou non le mode "debug" (JSON des requêtes et des réponses).
+     */
+    private boolean debug;
+
+    /**
+     * Texte JSON de la requête envoyée à l'API du LLM (affiché en mode debug).
+     */
+    private String texteRequeteJson;
+
+    /**
+     * Texte JSON de la réponse retournée par l'API du LLM (affiché en mode debug).
+     */
+    private String texteReponseJson;
+
+    /**
+     * Classe qui prépare le JSON des requêtes au LLM et extrait les réponses du JSON retourné.
      */
     @Inject
-    private GenerateurReponse generateurReponse;
+    private JsonAdapterPourGemini jsonAdapter;
 
     /**
      * Contexte JSF. Utilisé pour qu'un message d'erreur s'affiche dans le formulaire.
@@ -110,11 +127,33 @@ public class Bb implements Serializable {
         this.conversation = new StringBuilder(conversation);
     }
 
+    public boolean isDebug() {
+        return debug;
+    }
+
+    public void setDebug(boolean debug) {
+        this.debug = debug;
+    }
+
+    public String getTexteRequeteJson() {
+        return texteRequeteJson;
+    }
+
+    public void setTexteRequeteJson(String texteRequeteJson) {
+        this.texteRequeteJson = texteRequeteJson;
+    }
+
+    public String getTexteReponseJson() {
+        return texteReponseJson;
+    }
+
+    public void setTexteReponseJson(String texteReponseJson) {
+        this.texteReponseJson = texteReponseJson;
+    }
+
     /**
-     * Envoie la question au serveur.
-     * En attendant de l'envoyer à un LLM, le serveur fait un traitement quelconque, juste pour tester :
-     * Le traitement consiste à copier la question en minuscules et à l'entourer avec "||". Le rôle système
-     * est ajouté au début de la première réponse.
+     * Envoie la question au serveur, qui l'envoie à l'API du LLM.
+     * Le rôle système est envoyé à JsonAdapter au début de la conversation.
      *
      * @return null pour rester sur la même page.
      */
@@ -127,14 +166,28 @@ public class Bb implements Serializable {
             return null;
         }
 
-        // Traite la question pour construire la réponse.
-        String roleSystemePourModification = null;
-        if (this.conversation.isEmpty()) { // Si la conversation n'a pas encore commencé
-            roleSystemePourModification = this.roleSysteme; // Pour GenerateurReponse.modifier()
+        // Si la conversation n'a pas encore commencé, on envoie le rôle système à JsonAdapter
+        if (this.conversation.isEmpty()) {
+            // A ADAPTER : le nom de cette méthode doit être celui de JsonAdapterPourGemini
+            this.jsonAdapter.setSystemRole(this.roleSysteme);
             // Fige la liste déroulante qui permet de choisir le rôle système
             this.roleSystemeChangeable = false;
         }
-        this.reponse += this.generateurReponse.genererReponse(this.question, roleSystemePourModification);
+
+        try {
+            LlmInteraction interaction = jsonAdapter.envoyerRequete(question);
+            this.reponse = interaction.reponseExtraite();
+            this.texteRequeteJson = interaction.questionJson();
+            this.texteReponseJson = interaction.reponseJson();
+        } catch (Exception e) {
+            this.reponse = "Erreur : " + e.getMessage();
+            FacesMessage message =
+                    new FacesMessage(FacesMessage.SEVERITY_ERROR,
+                            "Problème de connexion avec l'API du LLM",
+                            "Problème de connexion avec l'API du LLM" + e.getMessage() + "\n"
+                                    + Arrays.toString(e.getStackTrace()));
+            facesContext.addMessage(null, message);
+        }
 
         // La conversation contient l'historique des questions-réponses depuis le début.
         afficherConversation();
@@ -148,6 +201,7 @@ public class Bb implements Serializable {
      * sans changer de vue.
      * Le fait de changer de vue va faire supprimer l'instance en cours du backing bean par CDI et donc on reprend
      * tout comme au début puisqu'une nouvelle instance du backing va être utilisée par la page index.xhtml.
+     *
      * @return "index"
      */
     public String nouveauChat() {
@@ -161,20 +215,43 @@ public class Bb implements Serializable {
         this.conversation.append("== User:\n").append(question).append("\n== Serveur:\n").append(reponse).append("\n");
     }
 
-
     public List<SelectItem> getRolesSysteme() {
         if (this.listeRolesSysteme == null) {
+            // Génère les rôles de l'API prédéfinis
             this.listeRolesSysteme = new ArrayList<>();
+            // Vous pouvez évidemment écrire ces rôles dans la langue que vous voulez.
+            String role = """
+                    You are a helpful assistant. You help the user to find the information they need.
+                    If the user type a question, you answer it.
+                    """;
+            // 1er argument : la valeur du rôle, 2ème argument : le libellé du rôle
+            this.listeRolesSysteme.add(new SelectItem(role, "Assistant"));
 
-            String role = "Assistant de productivite pour les etudiants";
+            role = """
+                    You are an interpreter. You translate from English to French and from French to English.
+                    If the user type a French text, you translate it into English.
+                    If the user type an English text, you translate it into French.
+                    If the text contains only one to three words, give some examples of usage of these words in English.
+                    """;
+            this.listeRolesSysteme.add(new SelectItem(role, "Traducteur Anglais-Français"));
 
-            this.listeRolesSysteme.add(
-                    new SelectItem(role, "StudyMate - Assistant étudiant")
-            );
+            role = """
+                    Your are a travel guide. If the user type the name of a country or of a town,
+                    you tell them what are the main places to visit in the country or the town
+                    are you tell them the average price of a meal.
+                    """;
+            this.listeRolesSysteme.add(new SelectItem(role, "Guide touristique"));
+
+            // Rôle système personnel ajouté pour l'exercice bonus
+            role = """
+                    You are StudyMate, a productivity assistant for students.
+                    You help the user organise their revision, plan their week and stay motivated.
+                    Answer in the language of the user, with short and practical advice.
+                    """;
+            this.listeRolesSysteme.add(new SelectItem(role, "StudyMate - Assistant étudiant"));
         }
 
         return this.listeRolesSysteme;
     }
-
 
 }
